@@ -66,8 +66,14 @@ BEGIN
         error_found := TRUE;
       END IF;
 
-      --If still no error, insert detail/history
+      --If still no error, insert history then detail rows 
       IF NOT error_found THEN
+
+        --Insert transaction history
+        INSERT INTO transaction_history(transaction_no, transaction_date, description)
+        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+
+        --Now insert detail rows and update accounts
         FOR r_detail IN c_transaction_details(r_transaction.transaction_no) LOOP
 
           --Insert into transaction_detail
@@ -84,15 +90,13 @@ BEGIN
             SET account_balance = account_balance - r_detail.transaction_amount
             WHERE account_no = r_detail.account_no;
           END IF;
-          
-        END LOOP;
 
-        INSERT INTO transaction_history(transaction_no, transaction_date, description)
-        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+        END LOOP;
 
         --Remove processed rows from holding table
         DELETE FROM new_transactions
         WHERE transaction_no = r_transaction.transaction_no;
+
       END IF;
     END IF;
   END LOOP;
