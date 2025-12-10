@@ -5,6 +5,7 @@
 -- •	You need to determine the default transaction type of an account (debit (D) or credit (C)) to decide whether to add or subtract when updating the account balance. 
 -- •	Once a transaction is successfully processed, it should be removed from the holding table.
 
+
 DECLARE
   --Outer cursor to fetch records from new_transactions
   CURSOR c_transaction IS
@@ -23,11 +24,11 @@ DECLARE
     JOIN account_type at ON a.account_type_code = at.account_type_code
     WHERE nt.transaction_no = p_no;
 
-    --Variables
-    total_debits NUMBER := 0;
-    total_credits NUMBER := 0;
-    error_found BOOLEAN := FALSE;
-    
+  --Variables
+  total_debits NUMBER;
+  total_credits NUMBER;
+  error_found BOOLEAN;
+
 BEGIN
   --Outer Loop through each distinct transaction in new_transactions
   FOR r_transaction IN c_transaction LOOP
@@ -35,68 +36,70 @@ BEGIN
     total_credits := 0;
     error_found := FALSE;
 
-    -- Missing (Null) Transactions
+    --Missing (Null) Transactions
     IF r_transaction.transaction_no IS NULL THEN
-      INSERT INTO WKIS_ERROR_LOG (transaction_no, transaction_date, description, error_msg)
-      VALUES(NULL, r_transaction.transaction_date, r_transaction.description, 'Missing a transaction number. Sorry, the transaction cannot be processed.');
+      INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+      VALUES(NULL, r_transaction.transaction_date, r_transaction.description, 
+             'Missing transaction number. Cannot process transaction.');
       error_found := TRUE;
     END IF;
 
-    --Skip entire transaction if error occurs
+    --If error occurs skip entire transaction
     IF error_found THEN
-      CONTINUE;
-    END IF;
-  
-    --Inner Loop through and insert into transaction_detail
-    FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
-    --Transaction Type with Debit & Credits
-      IF r_transaction_details.transaction_type = 'D' THEN
-        total_debits := r_transaction_details.transaction_amount + total_debits;
-      ELSIF r_transaction_details.transaction_type = 'C' THEN
-        total_credits := r_transaction_details.transaction_amount + total_credits;
+      NULL; -- skip to next transaction
+    ELSE
+
+      --Sum of debits and credits
+      FOR r_detail IN c_transaction_details(r_transaction.transaction_no) LOOP
+        IF r_detail.transaction_type = 'D' THEN
+          total_debits := total_debits + r_detail.transaction_amount;
+        ELSIF r_detail.transaction_type = 'C' THEN
+          total_credits := total_credits + r_detail.transaction_amount;
+        END IF;
+      END LOOP;
+
+      --Check debits ≠ credits
+      IF total_debits != total_credits THEN
+        INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description,
+        'The debits and credits are not equal in this transaction.');
+        error_found := TRUE;
       END IF;
 
-      --Insert into transaction_detail
-      INSERT INTO transaction_detail
-      (account_no, transaction_no, transaction_type, transaction_amount)
-      VALUES
-      (r_transaction_details.account_no, r_transaction.transaction_no, r_transaction_details.transaction_type, r_transaction_details.transaction_amount);
-      --Update account balance based on transaction type
-      IF r_transaction_details.transaction_type = r_transaction_details.default_trans_type THEN
-        UPDATE account
-        SET account_balance = account_balance + r_transaction_details.transaction_amount
-        WHERE account_no = r_transaction_details.account_no;
-      ELSE
-        UPDATE account
-        SET account_balance = account_balance - r_transaction_details.transaction_amount
-        WHERE account_no = r_transaction_details.account_no;
+      --If still no error, insert detail/history
+      IF NOT error_found THEN
+        FOR r_detail IN c_transaction_details(r_transaction.transaction_no) LOOP
+
+          --Insert into transaction_detail
+          INSERT INTO transaction_detail(account_no, transaction_no, transaction_type, transaction_amount)
+          VALUES (r_detail.account_no, r_transaction.transaction_no, r_detail.transaction_type, r_detail.transaction_amount);
+
+          --Update account balance based on transaction type
+          IF r_detail.transaction_type = r_detail.default_trans_type THEN
+            UPDATE account
+            SET account_balance = account_balance + r_detail.transaction_amount
+            WHERE account_no = r_detail.account_no;
+          ELSE
+            UPDATE account
+            SET account_balance = account_balance - r_detail.transaction_amount
+            WHERE account_no = r_detail.account_no;
+          END IF;
+          
+        END LOOP;
+
+        INSERT INTO transaction_history(transaction_no, transaction_date, description)
+        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+
+        --Remove processed rows from holding table
+        DELETE FROM new_transactions
+        WHERE transaction_no = r_transaction.transaction_no;
       END IF;
-    END LOOP;
-
-    --Check total Debits ≠ Credits 
-    IF total_debits != total_credits THEN
-      INSERT INTO WKIS_ERROR_LOG (transaction_no, transaction_date, description, error_msg)
-      VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, 'The debits and credits are not equal in this transaction.');
-      error_found := TRUE;
-    END IF; 
-
-       --Skips the inserts if there is an error
-    IF error_found THEN
-      CONTINUE;
     END IF;
-      
-
-    --Insert into transaction_history
-    INSERT INTO transaction_history (transaction_no, transaction_date, description)
-    VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
-
-
-    --Remove processed rows from holding table
-    DELETE FROM new_transactions
-    WHERE transaction_no = r_transaction.transaction_no;
   END LOOP;
-  
-  --Commit the changes
+
+
+  --Commit the Changes
   COMMIT;
 END;
 /
+
