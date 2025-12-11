@@ -38,9 +38,15 @@ BEGIN
     v_error_logged := FALSE;
     v_debit_total := 0;
     v_credit_total := 0;
+
   -- *****Handle NULL transaction_no rows (missing transaction number)*****
-  --(logic here)
-  --(use exception handling if needed)
+    IF r_transaction.transaction_no IS NULL THEN
+      v_error_msg := 'Missing transaction number. Cannot process transaction.';
+      INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+      VALUES (NULL, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+      COMMIT;
+      v_error_logged := TRUE;
+    END IF;
 
   --******Embedded block to process each non-NULL transaction number*****
     BEGIN
@@ -80,8 +86,11 @@ BEGIN
 
       --******Debits must equal credits for a valid transaction: error when Debits ≠ credits******
       IF NOT v_error_logged AND NVL(v_debit_total,0) <> NVL(v_credit_total,0) THEN
-        --(LOGIC HERE)
+        v_error_msg := 'The debits and credits are not equal in this transaction.';
+        INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
         v_error_logged := TRUE;
+        CONTINUE;
       END IF;
 
       --******After all validation, proceed with inserts and updates******  
