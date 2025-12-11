@@ -1,12 +1,21 @@
 --WKIS Company program for accounting system
 -- •	This is a double-entry accounting system that uses the accounting rules presented in the Accounting Notes document in Brightspace.
--- •	Take transactions from a holding table named NEW_TRANSACTIONS and insert them into the TRANSACTION_DETAIL and TRANSACTION_HISTORY tables.
--- •	At the same time, update the appropriate account balance in the ACCOUNT table. 
--- •	You need to determine the default transaction type of an account (debit (D) or credit (C)) to decide whether to add or subtract when updating the account balance. 
--- •	Once a transaction is successfully processed, it should be removed from the holding table.
 
 DECLARE
-    --Outer cursor to fetch records from new_transactions
+  --Constants for transaction types
+k_debit CONSTANT CHAR(1) := 'D';
+k_credit CONSTANT CHAR(1) := 'C';
+
+--Variables for error logging
+v_error_logged BOOLEAN := FALSE;
+v_error_msg VARCHAR2(400):='NULL';
+
+--Variables to hold counts and totals
+v_debit_total NUMBER := 0;
+v_credit_total NUMBER := 0;
+v_account_balance NUMBER;
+
+  --Outer cursor to fetch records from new_transactions
     CURSOR c_transaction IS
         SELECT DISTINCT transaction_no, transaction_date, description
         FROM new_transactions
@@ -29,84 +38,98 @@ DECLARE
     v_has_error BOOLEAN := FALSE;
     
 BEGIN
-    --Loop through each distinct transaction in new_transactions
-    FOR r_transaction IN c_transaction LOOP
+  --Loop through each distinct transaction
+  FOR r_transaction IN c_transaction LOOP
+  -- *****Handle NULL transaction_no rows (missing transaction number)*****
+  --(logic here)
+  --(use exception handling if needed)
 
-        -- Validates each transation against Exception Handlers        
-        BEGIN 
 
-            FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
+  --******Embedded block to process each non-NULL transaction number*****
+    BEGIN
+    --Loop through transaction_detail to process each row for the current transaction
+      FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
 
-                -- Validate that the transaction amount is not negative 
-                -- If negative, raise custom exception to log the error and skip processing
-                IF r_transaction_details.transaction_amount < 0 THEN
-                    RAISE ex_negative_amount;
-                END IF;
+        --******Validate transaction type using constants and not hard-coded values in the loop*****
+        IF r_transaction_details.transaction_type NOT IN (k_debit, k_credit) AND NOT v_error_logged THEN
+          v_error_msg := 'Invalid transaction type "' || NVL(r_transaction_details.transaction_type,'NULL') || '" for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '. Only characters D for Debit or C for Credit are allowed.';
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+          COMMIT;
+          v_error_logged := TRUE;
+        END IF;
 
-                -- Validate that the account exists by checking its default transaction type
-                -- If NULL, the account number is invalid, so raise custom exception
-                IF r_transaction_details.default_trans_type IS NULL THEN
-                    RAISE ex_invalid_account;
-                END IF;
+        -- ******Validate negative or NULL transaction amount for each row in the loop*****
+        IF r_transaction_details.transaction_amount IS NULL OR r_transaction_details.transaction_amount < 0 AND NOT v_error_logged THEN
+          v_error_msg := 'Negative or NULL amount (' || NVL(TO_CHAR(r_transaction_details.transaction_amount),'NULL') || ') for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '.';
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+          COMMIT;
+          v_error_logged := TRUE;
+        END IF;
 
-            END LOOP;
+        --******Validation of invalid account number (basically if the account does not exist)*****
+        --(logic here)
 
-        --Insert into transaction_history
-        INSERT INTO transaction_history (transaction_no, transaction_date, description)
-        VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+        --******If the transaction had no errors, accumulate total debit and total credit***** 
+        IF NOT v_error_logged THEN
+          IF r_transaction_details.transaction_type = k_debit THEN
+            v_debit_total := NVL(v_debit_total,0) + r_transaction_details.transaction_amount;
+          ELSE
+            v_credit_total := NVL(v_credit_total,0) + r_transaction_details.transaction_amount;
+          END IF;
+        END IF;
+      END LOOP;
 
-    --Loop through and insert into transaction_detail
-    FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
+      --******If transaction had errors, skip processing and keep them in new_transactions table.****
+      IF v_error_logged THEN
+        CONTINUE;
+      END IF;
+
+      --******Debits must equal credits for a valid transaction: error when Debits ≠ credits******
+      IF NVL(v_debit_total,0) <> NVL(v_credit_total,0) THEN
+      --(logic here)
+        CONTINUE;
+      END IF;
+
+      --******After all validation, proceed with inserts and updates******  
+      --Insert into transaction_history
+      INSERT INTO transaction_history (transaction_no, transaction_date, description)
+      VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+
+      --Loop through and insert into transaction_detail
+      FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
         INSERT INTO transaction_detail
-            (account_no, transaction_no, transaction_type, transaction_amount)
+          (account_no, transaction_no, transaction_type, transaction_amount)
         VALUES
-            (r_transaction_details.account_no, r_transaction.transaction_no, r_transaction_details.transaction_type, r_transaction_details.transaction_amount);
+          (r_transaction_details.account_no, r_transaction.transaction_no, r_transaction_details.transaction_type, r_transaction_details.transaction_amount);
 
         --Update account balance based on transaction type
         IF r_transaction_details.transaction_type = r_transaction_details.default_trans_type THEN
-            UPDATE account
-            SET account_balance = account_balance + r_transaction_details.transaction_amount
-            WHERE account_no = r_transaction_details.account_no;
+          UPDATE account
+          SET account_balance = account_balance + r_transaction_details.transaction_amount
+          WHERE account_no = r_transaction_details.account_no;
         ELSE
-            UPDATE account
-            SET account_balance = account_balance - r_transaction_details.transaction_amount
-            WHERE account_no = r_transaction_details.account_no;
+          UPDATE account
+          SET account_balance = account_balance - r_transaction_details.transaction_amount
+          WHERE account_no = r_transaction_details.account_no;
         END IF;
-    END LOOP;
+      END LOOP;
 
-    --Remove processed rows from holding table
-    IF NOT v_has_error THEN
-        DELETE FROM new_transactions
-        WHERE transaction_no = r_transaction.transaction_no;
-    END IF;
+      --Remove processed rows from holding table
+      DELETE FROM new_transactions
+            WHERE transaction_no = r_transaction.transaction_no;
 
-    -- Exception handling
-    EXCEPTION 
+      --Commit the successful transaction processing
+      COMMIT;
+    
+    --******* Custom exception handling*******
+    --Exception block for handling any unexpected errors during processing
+    --(logic here to log errors and rollback changes if needed)
 
-        -- Invalid account number Exception
-        WHEN ex_invalid_account THEN
-            INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
-            VALUES (r_transaction.transaction_no,
-                    r_transaction.transaction_date,
-                    r_transaction.description,
-                    'Invalid account number in transaction.');
-            v_has_error := TRUE;
-
-        -- Negative transaction amount Exception 
-        WHEN ex_negative_amount THEN 
-            INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
-            VALUES (r_transaction.transaction_no,
-                    r_transaction.transaction_date,
-                    r_transaction.description,
-                    'Negative transaction amount not allowed.');
-            v_has_error := TRUE;
-
+    
     END;
-
   END LOOP;
-  
-  --Commit the changes
-  COMMIT;
 END;
 /
 
