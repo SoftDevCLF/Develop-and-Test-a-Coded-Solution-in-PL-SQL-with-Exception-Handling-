@@ -6,7 +6,7 @@ DECLARE
 k_debit CONSTANT CHAR(1) := 'D';
 k_credit CONSTANT CHAR(1) := 'C';
 
-invalid_transaction_type EXCEPTION;  --custome exception for invalid transcation type
+invalid_transaction_type EXCEPTION;  --custom exception for invalid transcation type
 
 --Variables for error logging
 v_error_logged BOOLEAN := FALSE;
@@ -179,10 +179,39 @@ BEGIN
       COMMIT;
     
     --******* Custom exception handling*******
-    --Exception block for handling any unexpected errors during processing
-    --(logic here to log errors and rollback changes if needed)
+    EXCEPTION
+    --Invalid Transaction Type
+    WHEN invalid_transaction_type THEN
+        IF NOT v_error_logged THEN
+          v_error_msg := 'Invalid transaction type detected. Only D or C allowed.';
 
-    
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no,
+                  r_transaction.transaction_date,
+                  r_transaction.description,
+                  v_error_msg);
+
+          v_error_logged := TRUE;
+        END IF;
+
+        ROLLBACK;
+
+    --When others (System errors)
+    WHEN OTHERS THEN
+        IF NOT v_error_logged THEN
+          v_error_msg := 'System error: ' || SQLERRM;
+
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no,
+                  r_transaction.transaction_date,
+                  r_transaction.description,
+                  v_error_msg);
+
+          v_error_logged := TRUE;
+        END IF;
+
+        ROLLBACK;
+
     END;
   END LOOP;
 END;
