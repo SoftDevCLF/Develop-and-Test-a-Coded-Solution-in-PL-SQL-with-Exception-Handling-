@@ -35,17 +35,27 @@ v_account_balance NUMBER;
 BEGIN
   --Loop through each distinct transaction
   FOR r_transaction IN c_transaction LOOP
-  -- *****Handle NULL transaction_no rows (missing transaction number)*****
-  IF r_transaction.transaction_no IS NULL THEN
-    v_error_msg := 'Missing transaction number. Cannot process transaction.';
-    INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
-    VALUES (NULL, r_transaction.transaction_date, r_transaction.description, v_error_msg);
-    COMMIT;
-    v_error_logged := TRUE;
-  END IF;
+  
+    --Reset error flag and totals for each new transaction
+    v_error_logged := FALSE;
+    v_debit_total := 0;
+    v_credit_total := 0;
+    
+    -- *****Handle NULL transaction_no rows (missing transaction number)*****
+    IF r_transaction.transaction_no IS NULL THEN
+      v_error_msg := 'Missing transaction number. Cannot process transaction.';
+      INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+      VALUES (NULL, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+      COMMIT;
+      v_error_logged := TRUE;
+    END IF;
 
+    --Skip to next transaction if error found
+    IF v_error_logged THEN
+      CONTINUE;
+    END IF;
 
-  --******Embedded block to process each non-NULL transaction number*****
+    --******Embedded block to process each non-NULL transaction number*****
     BEGIN
     --Loop through transaction_detail to process each row for the current transaction
       FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
@@ -102,6 +112,12 @@ BEGIN
 
       --Loop through and insert into transaction_detail
       FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
+      
+        --Skip any row with invalid transaction type
+        IF r_transaction_details.transaction_type NOT IN (k_debit, k_credit) THEN
+          CONTINUE;
+        END IF;
+        
         INSERT INTO transaction_detail
           (account_no, transaction_no, transaction_type, transaction_amount)
         VALUES
