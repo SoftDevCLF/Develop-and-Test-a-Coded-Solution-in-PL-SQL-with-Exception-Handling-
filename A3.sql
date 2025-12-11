@@ -1,12 +1,20 @@
 --WKIS Company program for accounting system
 -- •	This is a double-entry accounting system that uses the accounting rules presented in the Accounting Notes document in Brightspace.
--- •	Take transactions from a holding table named NEW_TRANSACTIONS and insert them into the TRANSACTION_DETAIL and TRANSACTION_HISTORY tables.
--- •	At the same time, update the appropriate account balance in the ACCOUNT table. 
--- •	You need to determine the default transaction type of an account (debit (D) or credit (C)) to decide whether to add or subtract when updating the account balance. 
--- •	Once a transaction is successfully processed, it should be removed from the holding table.
-
 
 DECLARE
+--Constants for transaction types
+k_debit CONSTANT CHAR(1) := 'D';
+k_credit CONSTANT CHAR(1) := 'C';
+
+--Variables for error logging
+v_error_logged BOOLEAN := FALSE;
+v_error_msg VARCHAR2(400):='NULL';
+
+--Variables to hold counts and totals
+v_debit_total NUMBER := 0;
+v_credit_total NUMBER := 0;
+v_account_balance NUMBER;
+
   --Outer cursor to fetch records from new_transactions
   CURSOR c_transaction IS
     SELECT DISTINCT transaction_no, transaction_date, description
@@ -23,87 +31,107 @@ DECLARE
     JOIN account a ON nt.account_no = a.account_no
     JOIN account_type at ON a.account_type_code = at.account_type_code
     WHERE nt.transaction_no = p_no;
-
-  --Variables
-  total_debits NUMBER;
-  total_credits NUMBER;
-  error_found BOOLEAN;
-
+    
 BEGIN
-  --Outer Loop through each distinct transaction in new_transactions
+  --Loop through each distinct transaction
   FOR r_transaction IN c_transaction LOOP
-    total_debits := 0;
-    total_credits := 0;
-    error_found := FALSE;
+  -- *****Handle NULL transaction_no rows (missing transaction number)*****
+  IF r_transaction.transaction_no IS NULL THEN
+    v_error_msg := 'Missing transaction number. Cannot process transaction.';
+    INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
+    VALUES (NULL, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+    COMMIT;
+    v_error_logged := TRUE;
+  END IF;
 
-    --Missing (Null) Transactions
-    IF r_transaction.transaction_no IS NULL THEN
-      INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
-      VALUES(NULL, r_transaction.transaction_date, r_transaction.description, 
-             'Missing transaction number. Cannot process transaction.');
-      error_found := TRUE;
-    END IF;
 
-    --If error occurs skip entire transaction
-    IF error_found THEN
-      NULL; -- skip to next transaction
-    ELSE
+  --******Embedded block to process each non-NULL transaction number*****
+    BEGIN
+    --Loop through transaction_detail to process each row for the current transaction
+      FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
 
-      --Sum of debits and credits
-      FOR r_detail IN c_transaction_details(r_transaction.transaction_no) LOOP
-        IF r_detail.transaction_type = 'D' THEN
-          total_debits := total_debits + r_detail.transaction_amount;
-        ELSIF r_detail.transaction_type = 'C' THEN
-          total_credits := total_credits + r_detail.transaction_amount;
+        --******Validate transaction type using constants and not hard-coded values in the loop*****
+        IF r_transaction_details.transaction_type NOT IN (k_debit, k_credit) AND NOT v_error_logged THEN
+          v_error_msg := 'Invalid transaction type "' || NVL(r_transaction_details.transaction_type,'NULL') || '" for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '. Only characters D for Debit or C for Credit are allowed.';
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+          COMMIT;
+          v_error_logged := TRUE;
+        END IF;
+
+        -- ******Validate negative or NULL transaction amount for each row in the loop*****
+        IF r_transaction_details.transaction_amount IS NULL OR r_transaction_details.transaction_amount < 0 AND NOT v_error_logged THEN
+          v_error_msg := 'Negative or NULL amount (' || NVL(TO_CHAR(r_transaction_details.transaction_amount),'NULL') || ') for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '.';
+          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+          VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+          COMMIT;
+          v_error_logged := TRUE;
+        END IF;
+
+        --******Validation of invalid account number (basically if the account does not exist)*****
+        --(logic here)
+
+        --******If the transaction had no errors, accumulate total debit and total credit***** 
+        IF NOT v_error_logged THEN
+          IF r_transaction_details.transaction_type = k_debit THEN
+            v_debit_total := NVL(v_debit_total,0) + r_transaction_details.transaction_amount;
+          ELSE
+            v_credit_total := NVL(v_credit_total,0) + r_transaction_details.transaction_amount;
+          END IF;
         END IF;
       END LOOP;
 
-      --Check debits ≠ credits
-      IF total_debits != total_credits THEN
+      --******If transaction had errors, skip processing and keep them in new_transactions table.****
+      IF v_error_logged THEN
+        CONTINUE;
+      END IF;
+
+      --******Debits must equal credits for a valid transaction: error when Debits ≠ credits******
+      IF NVL(v_debit_total,0) <> NVL(v_credit_total,0) THEN
+        v_error_msg := 'The debits and credits are not equal in this transaction.';
         INSERT INTO wkis_error_log(transaction_no, transaction_date, description, error_msg)
-        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description,
-        'The debits and credits are not equal in this transaction.');
-        error_found := TRUE;
+        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+        v_error_logged := TRUE;
+        CONTINUE;
       END IF;
 
-      --If still no error, insert history then detail rows 
-      IF NOT error_found THEN
+      --******After all validation, proceed with inserts and updates******  
+      --Insert into transaction_history
+      INSERT INTO transaction_history (transaction_no, transaction_date, description)
+      VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
 
-        --Insert transaction history
-        INSERT INTO transaction_history(transaction_no, transaction_date, description)
-        VALUES(r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description);
+      --Loop through and insert into transaction_detail
+      FOR r_transaction_details IN c_transaction_details(r_transaction.transaction_no) LOOP
+        INSERT INTO transaction_detail
+          (account_no, transaction_no, transaction_type, transaction_amount)
+        VALUES
+          (r_transaction_details.account_no, r_transaction.transaction_no, r_transaction_details.transaction_type, r_transaction_details.transaction_amount);
 
-        --Now insert detail rows and update accounts
-        FOR r_detail IN c_transaction_details(r_transaction.transaction_no) LOOP
+        --Update account balance based on transaction type
+        IF r_transaction_details.transaction_type = r_transaction_details.default_trans_type THEN
+          UPDATE account
+          SET account_balance = account_balance + r_transaction_details.transaction_amount
+          WHERE account_no = r_transaction_details.account_no;
+        ELSE
+          UPDATE account
+          SET account_balance = account_balance - r_transaction_details.transaction_amount
+          WHERE account_no = r_transaction_details.account_no;
+        END IF;
+      END LOOP;
 
-          --Insert into transaction_detail
-          INSERT INTO transaction_detail(account_no, transaction_no, transaction_type, transaction_amount)
-          VALUES (r_detail.account_no, r_transaction.transaction_no, r_detail.transaction_type, r_detail.transaction_amount);
+      --Remove processed rows from holding table
+      DELETE FROM new_transactions
+            WHERE transaction_no = r_transaction.transaction_no;
 
-          --Update account balance based on transaction type
-          IF r_detail.transaction_type = r_detail.default_trans_type THEN
-            UPDATE account
-            SET account_balance = account_balance + r_detail.transaction_amount
-            WHERE account_no = r_detail.account_no;
-          ELSE
-            UPDATE account
-            SET account_balance = account_balance - r_detail.transaction_amount
-            WHERE account_no = r_detail.account_no;
-          END IF;
+      --Commit the successful transaction processing
+      COMMIT;
+    
+    --******* Custom exception handling*******
+    --Exception block for handling any unexpected errors during processing
+    --(logic here to log errors and rollback changes if needed)
 
-        END LOOP;
-
-        --Remove processed rows from holding table
-        DELETE FROM new_transactions
-        WHERE transaction_no = r_transaction.transaction_no;
-
-      END IF;
-    END IF;
+    
+    END;
   END LOOP;
-
-
-  --Commit the Changes
-  COMMIT;
 END;
 /
-
