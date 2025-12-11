@@ -2,7 +2,7 @@
 -- •	This is a double-entry accounting system that uses the accounting rules presented in the Accounting Notes document in Brightspace.
 
 DECLARE
-  --Constants for transaction types
+--Constants for transaction types
 k_debit CONSTANT CHAR(1) := 'D';
 k_credit CONSTANT CHAR(1) := 'C';
 
@@ -16,26 +16,21 @@ v_credit_total NUMBER := 0;
 v_account_balance NUMBER;
 
   --Outer cursor to fetch records from new_transactions
-    CURSOR c_transaction IS
-        SELECT DISTINCT transaction_no, transaction_date, description
-        FROM new_transactions
-        ORDER BY transaction_no;
+  CURSOR c_transaction IS
+    SELECT DISTINCT transaction_no, transaction_date, description
+    FROM new_transactions
+    ORDER BY transaction_no;
 
-    --Inner cursor for all rows belonging to one transaction
-    CURSOR c_transaction_details(p_no NUMBER) IS
-        SELECT nt.account_no,
-            nt.transaction_type,
-            nt.transaction_amount,
-            at.default_trans_type
-        FROM new_transactions nt
-        LEFT JOIN account a ON nt.account_no = a.account_no
-        LEFT JOIN account_type at ON a.account_type_code = at.account_type_code
-        WHERE nt.transaction_no = p_no;
-
-    ex_invalid_account EXCEPTION;
-    ex_negative_amount EXCEPTION;
-
-    v_has_error BOOLEAN := FALSE;
+  --Inner cursor for all rows belonging to one transaction
+  CURSOR c_transaction_details(p_no NUMBER) IS
+    SELECT nt.account_no,
+           nt.transaction_type,
+           nt.transaction_amount,
+           at.default_trans_type
+    FROM new_transactions nt
+    JOIN account a ON nt.account_no = a.account_no
+    JOIN account_type at ON a.account_type_code = at.account_type_code
+    WHERE nt.transaction_no = p_no;
     
 BEGIN
   --Loop through each distinct transaction
@@ -75,16 +70,50 @@ BEGIN
         END IF;
 
         -- ******Validate negative or NULL transaction amount for each row in the loop*****
-        IF r_transaction_details.transaction_amount IS NULL OR r_transaction_details.transaction_amount < 0 AND NOT v_error_logged THEN
-          v_error_msg := 'Negative or NULL amount (' || NVL(TO_CHAR(r_transaction_details.transaction_amount),'NULL') || ') for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '.';
-          INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
-          VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
-          COMMIT;
-          v_error_logged := TRUE;
+        IF (r_transaction_details.transaction_amount IS NULL
+            OR r_transaction_details.transaction_amount < 0)
+            AND NOT v_error_logged THEN
+
+            v_error_msg := 'Invalid amount (' ||
+                            NVL(TO_CHAR(r_transaction_details.transaction_amount), 'NULL') ||
+                            ') for account ' ||
+                            NVL(TO_CHAR(r_transaction_details.account_no), 'NULL') ||
+                            '. Amount cannot be negative or NULL';
+
+            INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+            VALUES (r_transaction.transaction_no,
+                    r_transaction.transaction_date,
+                    r_transaction.description,
+                    v_error_msg);
+
+            v_error_logged := TRUE;
+
         END IF;
 
         --******Validation of invalid account number (basically if the account does not exist)*****
-        --(logic here)
+        IF NOT v_error_logged THEN
+            BEGIN
+                SELECT 1
+                INTO v_account_balance
+                FROM account
+                WHERE account_no = r_transaction_details.account_no;
+
+            EXCEPTION
+                WHEN NO_DATA_FOUND THEN
+                    v_error_msg := 'Invalid account number "' ||
+                                    NVL(TO_CHAR(r_transaction_details.account_no), 'NULL') ||
+                                    '". This account does not exist in the ACCOUNT table.';
+
+                    INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+                    VALUES (r_transaction.transaction_no,
+                            r_transaction.transaction_date,
+                            r_transaction.description,
+                            v_error_msg);
+
+                    v_error_logged := TRUE;
+                    
+            END;
+        END IF;
 
         --******If the transaction had no errors, accumulate total debit and total credit***** 
         IF NOT v_error_logged THEN
@@ -156,7 +185,3 @@ BEGIN
   END LOOP;
 END;
 /
-
-SELECT *
-FROM wkis_error_log
-ORDER BY transaction_no;
