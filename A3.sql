@@ -16,6 +16,8 @@ v_error_msg VARCHAR2(400);
 v_debit_total NUMBER;
 v_credit_total NUMBER;
 
+v_account_balance NUMBER;
+
   --Outer cursor to fetch records from new_transactions
   CURSOR c_transaction IS
     SELECT DISTINCT transaction_no, transaction_date, description
@@ -66,14 +68,35 @@ BEGIN
 
           -- ******Validate negative or NULL transaction amount for each row in the loop*****
           IF (r_transaction_details.transaction_amount IS NULL OR r_transaction_details.transaction_amount < 0) AND NOT v_error_logged THEN
-            v_error_msg := 'Negative or NULL amount (' || NVL(TO_CHAR(r_transaction_details.transaction_amount),'NULL') || ') for account ' || NVL(TO_CHAR(r_transaction_details.account_no),'NULL') || '.';
+
+            v_error_msg := 'Invalid amount (' || NVL(TO_CHAR(r_transaction_details.transaction_amount), 'NULL') ||') for account ' || NVL(TO_CHAR(r_transaction_details.account_no), 'NULL') || '. Amount cannot be negative or NULL';
+
             INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
-            VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+            VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description,v_error_msg);
+
             v_error_logged := TRUE;
+            
           END IF;
 
+
           --******Validation of invalid account number (basically if the account does not exist)*****
-          --(logic here)
+          IF NOT v_error_logged THEN
+            BEGIN
+              SELECT 1
+              INTO v_account_balance
+              FROM account
+              WHERE account_no = r_transaction_details.account_no;
+
+            EXCEPTION
+              WHEN NO_DATA_FOUND THEN
+                v_error_msg := 'Invalid account number "' || NVL(TO_CHAR(r_transaction_details.account_no), 'NULL') || '". This account does not exist in the ACCOUNT table.';
+
+                INSERT INTO wkis_error_log (transaction_no, transaction_date, description, error_msg)
+                VALUES (r_transaction.transaction_no, r_transaction.transaction_date, r_transaction.description, v_error_msg);
+
+                v_error_logged := TRUE;
+            END;
+          END IF;
 
           --******If the transaction had no errors, accumulate total debit and total credit***** 
           IF NOT v_error_logged THEN
