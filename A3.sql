@@ -31,8 +31,8 @@ v_account_balance NUMBER;
            nt.transaction_amount,
            at.default_trans_type
     FROM new_transactions nt
-    JOIN account a ON nt.account_no = a.account_no
-    JOIN account_type at ON a.account_type_code = at.account_type_code
+    LEFT JOIN account a ON nt.account_no = a.account_no
+    LEFT JOIN account_type at ON a.account_type_code = at.account_type_code
     WHERE nt.transaction_no = p_no;
     
 BEGIN
